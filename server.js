@@ -1,52 +1,83 @@
 const express = require('express');
 const fs = require('fs');
-const bodyParser = require('body-parser');
 const path = require('path');
 
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
-// Файл для хранения статусов домов
-const STATUS_FILE = path.join(__dirname, 'statuses.json');
+/* ===== CORS ===== */
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  next();
+});
 
-// Мидлвар для JSON
-app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
 
-// Чтение статусов
-function readStatuses() {
-    if (fs.existsSync(STATUS_FILE)) {
-        return JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8'));
-    }
-    return {};
+/* ===== DATA ===== */
+const DATA_FILE = path.join(__dirname, 'statuses.json');
+if (!fs.existsSync(DATA_FILE)) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify({}, null, 2));
 }
 
-// Сохранение статусов
-function saveStatuses(statuses) {
-    fs.writeFileSync(STATUS_FILE, JSON.stringify(statuses, null, 2));
-}
-
-// Вебхук Битрикс24
+/* ===== WEBHOOK FROM BITRIX ===== */
 app.post('/webhook', (req, res) => {
-    const deal = req.body;
-    const objectId = deal?.PROPERTY_VALUES?.OBJECT_ID;
-    const stage = deal?.STAGE_ID;
+  const projectId = req.body.PROJECT_ID;
+  const stage = req.body.STAGE_ID;
+  const objectId = req.body.PROPERTY_VALUES?.OBJECT_ID;
 
-    if (!objectId || !stage) return res.status(400).send('Нет objectId или stage');
+  if (!projectId || !stage || !objectId) {
+    return res.status(400).json({ success: false, error: 'Нет PROJECT_ID, STAGE_ID или OBJECT_ID' });
+  }
 
-    let status = 'available';
-    if (stage === 'WON') status = 'sold';
+  const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
 
-    const statuses = readStatuses();
-    statuses[objectId] = status;
-    saveStatuses(statuses);
+  if (!data[projectId]) data[projectId] = {};
+  data[projectId][objectId] = stage === 'WON' ? 'sold' : 'available';
 
-    res.send({ success: true });
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  res.json({ success: true });
 });
 
-// Отдача JSON для Тильды
+/* ===== STATUSES FOR TILDA ===== */
 app.get('/statuses.json', (req, res) => {
-    res.json(readStatuses());
+  const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  res.json(data);
 });
 
-app.listen(PORT, () => console.log(`Сервер запущен на http://localhost:${PORT}`));
+/* ===== SCRIPT FOR TILDA ===== */
+app.get('/script.js', (req, res) => {
+  res.type('application/javascript');
+  res.send(`
+(function () {
+  const PROJECT_ID = window.PROJECT_ID;
+  const URL = 'http://localhost:8080/statuses.json';
+
+  async function update() {
+    try {
+      const res = await fetch(URL);
+      const all = await res.json();
+      const statuses = all[PROJECT_ID] || {};
+
+      document.querySelectorAll('[data-object-id]').forEach(el => {
+        const id = el.dataset.objectId;
+        el.style.transition = 'background-color 0.3s';
+        el.style.backgroundColor =
+          statuses[id] === 'sold' ? '#ff4d4d' : '#4CAF50';
+      });
+    } catch (e) {
+      console.error('Ошибка обновления домов', e);
+    }
+  }
+
+  update();
+  setInterval(update, 10000);
+})();
+  `);
+});
+
+/* ===== START SERVER ===== */
+app.listen(PORT, () => console.log('Server started on port ' + PORT));
